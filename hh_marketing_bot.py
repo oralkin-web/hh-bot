@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
 HH.ru Design Director Job Bot with Claude AI
-=============================================
-Ищет вакансии на hh.ru для Константина Оралкина,
-фильтрует через Claude AI, отправляет подходящие в Telegram.
 """
 
 import os
@@ -21,11 +18,6 @@ import anthropic
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
-
-# ─────────────────────────────────────────────
-#  Ключи читаются из переменных окружения Railway
-#  Не вписывай их в код — задай в Railway → Variables
-# ─────────────────────────────────────────────
 
 TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -77,9 +69,22 @@ MY_PROFILE = """
 
 MIN_SCORE = 65
 
-SEEN_FILE = Path("seen_vacancies.json")
+SEEN_FILE   = Path("seen_vacancies.json")
+PAUSED_FILE = Path("paused.flag")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
+
+
+def is_paused() -> bool:
+    return PAUSED_FILE.exists()
+
+
+def set_paused(state: bool):
+    if state:
+        PAUSED_FILE.touch()
+    else:
+        PAUSED_FILE.unlink(missing_ok=True)
 
 
 def load_seen() -> set:
@@ -129,17 +134,17 @@ def strip_html(text: str) -> str:
 
 
 def score_vacancy_with_claude(vacancy: dict) -> dict:
-    details = get_vacancy_details(vacancy.get("id", ""))
+    details     = get_vacancy_details(vacancy.get("id", ""))
     description = strip_html(details.get("description", ""))
-    salary = vacancy.get("salary")
-    salary_str = "не указана"
+    salary      = vacancy.get("salary")
+    salary_str  = "не указана"
     if salary:
         parts = []
         if salary.get("from"): parts.append(f"от {salary['from']:,}")
         if salary.get("to"):   parts.append(f"до {salary['to']:,}")
         salary_str = " ".join(parts) + f" {salary.get('currency','RUB')}"
 
-    key_skills = [s["name"] for s in details.get("key_skills", [])]
+    key_skills   = [s["name"] for s in details.get("key_skills", [])]
     vacancy_text = (
         f"Название: {vacancy.get('name','—')}\n"
         f"Компания: {vacancy.get('employer',{}).get('name','—')}\n"
@@ -174,9 +179,9 @@ def esc(t: str) -> str:
 
 
 def build_message(vacancy: dict, ai: dict) -> str:
-    score  = ai.get("score", 0)
-    emoji  = "🟢" if score >= 80 else "🟡" if score >= 65 else "🔴"
-    salary = vacancy.get("salary")
+    score     = ai.get("score", 0)
+    emoji     = "🟢" if score >= 80 else "🟡" if score >= 65 else "🔴"
+    salary    = vacancy.get("salary")
     salary_str = "не указана"
     if salary:
         parts = []
@@ -193,17 +198,21 @@ def build_message(vacancy: dict, ai: dict) -> str:
         f"🤖 *AI\\-оценка: {score}/100*\n"
         f"_{esc(ai.get('reason',''))}_\n"
     )
-    for p in ai.get("pros", []):  msg += f"\n  ✅ {esc(p)}"
-    for c in ai.get("cons", []):  msg += f"\n  ❌ {esc(c)}"
+    for p in ai.get("pros", []): msg += f"\n  ✅ {esc(p)}"
+    for c in ai.get("cons", []): msg += f"\n  ❌ {esc(c)}"
     msg += f"\n\n🔗 [Открыть вакансию]({vacancy.get('alternate_url','')})"
     return msg
 
 
 async def check_and_notify(bot: Bot):
+    if is_paused():
+        log.info("⏸ Бот на паузе, пропускаю проверку")
+        return
+
     log.info("🔍 Проверяю вакансии...")
-    seen = load_seen()
+    seen      = load_seen()
     vacancies = fetch_vacancies()
-    new = [v for v in vacancies if v["id"] not in seen]
+    new       = [v for v in vacancies if v["id"] not in seen]
     log.info(f"Новых: {len(new)}")
 
     if not new:
@@ -213,14 +222,18 @@ async def check_and_notify(bot: Bot):
     for v in new:
         seen.add(v["id"])
         log.info(f"  → {v.get('name')} / {v.get('employer',{}).get('name','?')}")
-        ai = score_vacancy_with_claude(v)
+        ai    = score_vacancy_with_claude(v)
         score = ai.get("score", 0)
         log.info(f"     {score}/100")
 
         if score >= MIN_SCORE:
             try:
-                await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=build_message(v, ai),
-                                       parse_mode=ParseMode.MARKDOWN_V2, disable_web_page_preview=True)
+                await bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=build_message(v, ai),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    disable_web_page_preview=True
+                )
                 sent += 1
             except Exception as e:
                 log.error(f"Telegram ошибка: {e}")
@@ -241,10 +254,14 @@ async def check_and_notify(bot: Bot):
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = "⏸ на паузе" if is_paused() else "✅ активен"
     await update.message.reply_text(
         f"👋 Привет, Константин\\!\n\n"
+        f"Статус: {status}\n\n"
         f"Слежу за вакансиями Design Director / Head of Design на hh\\.ru\\.\n\n"
         f"/check — проверить прямо сейчас\n"
+        f"/pause — поставить на паузу\n"
+        f"/resume — возобновить\n"
         f"/status — текущие настройки\n"
         f"/clear — сбросить историю",
         parse_mode=ParseMode.MARKDOWN_V2
@@ -252,14 +269,35 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Запускаю проверку...")
+    if is_paused():
+        await update.message.reply_text("⏸ Бот на паузе\\. Напиши /resume чтобы возобновить\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        return
+    await update.message.reply_text("🔍 Запускаю проверку, подожди...")
     await check_and_notify(context.bot)
 
 
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    set_paused(True)
+    await update.message.reply_text(
+        "⏸ Бот поставлен на паузу\\. Автоматические проверки остановлены\\.\nНапиши /resume чтобы возобновить\\.",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    set_paused(False)
+    await update.message.reply_text(
+        "▶️ Бот возобновлён\\! Буду проверять вакансии каждый час\\.",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    seen = load_seen()
+    seen   = load_seen()
+    status = "⏸ на паузе" if is_paused() else "✅ активен"
     await update.message.reply_text(
         f"⚙️ *Настройки*\n\n"
+        f"Статус: {status}\n"
         f"📍 Регион: Москва\n"
         f"⏰ Проверка каждые: `{SEARCH_CONFIG['check_interval_minutes']} мин`\n"
         f"🏆 Мин\\. балл AI: `{MIN_SCORE}/100`\n"
@@ -288,12 +326,14 @@ def run_scheduler(bot: Bot, loop):
 def main():
     log.info("🚀 Запускаю HH Design Bot...")
     if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY]):
-        print("⚠️  Задай переменные окружения в Railway: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY")
+        print("⚠️  Задай переменные окружения: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY")
         return
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("check",  cmd_check))
+    app.add_handler(CommandHandler("pause",  cmd_pause))
+    app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("clear",  cmd_clear))
 
