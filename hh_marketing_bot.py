@@ -24,7 +24,7 @@ TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 SEARCH_CONFIG = {
-    "query": "руководитель дизайн студии OR руководитель дизайн группы OR дизайн директор OR дизайн-директор OR head of design OR директор по дизайну",
+    "query": "руководитель дизайн студии OR руководитель дизайн группы OR дизайн директор OR дизайн-директор OR Design Director OR head of design OR директор по дизайну",
     "area": 1,
     "per_page": 50,
     "check_interval_minutes": 60,
