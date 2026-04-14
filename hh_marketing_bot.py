@@ -24,7 +24,7 @@ TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 SEARCH_CONFIG = {
-    "query": "руководитель дизайн-студии OR дизайн-директор OR head of design",
+    "query": "руководитель дизайн студии OR руководитель дизайн группы OR дизайн директор OR дизайн-директор OR head of design OR директор по дизайну",
     "area": 1,
     "per_page": 50,
     "check_interval_minutes": 60,
@@ -40,6 +40,7 @@ MY_PROFILE = """
 - Рассматриваю крупный бизнес, продуктовые компании, retail, fintech, tech
 - Только офис или гибрид в Москве
 - Полная занятость
+- Руководитель дизайн-группы / дизайн-отдела в крупном девелопере или корпорации
 
 ОПЫТ:
 - Операционный директор дизайн-студии Азбуки Вкуса (март 2025–сейчас)
