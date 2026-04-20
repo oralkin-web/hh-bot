@@ -78,9 +78,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 HH_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "HH-User-Agent/1.0 (oralkin@gmail.com)",
     "Accept": "application/json",
-    "Accept-Language": "ru-RU,ru;q=0.9",
+    "HH-User-Agent": "HH-User-Agent/1.0 (oralkin@gmail.com)",
 }
 
 
