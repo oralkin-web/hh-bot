@@ -77,6 +77,12 @@ PAUSED_FILE = Path("paused.flag")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
+HH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "ru-RU,ru;q=0.9",
+}
+
 
 def is_paused() -> bool:
     return PAUSED_FILE.exists()
@@ -110,12 +116,12 @@ def fetch_vacancies() -> list:
         "order_by": "publication_time",
     }
     try:
-r = requests.get("https://api.hh.ru/vacancies", params=params,
-                         headers={
-                             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                             "Accept": "application/json",
-                             "Accept-Language": "ru-RU,ru;q=0.9",
-                         },
+        r = requests.get(
+            "https://api.hh.ru/vacancies",
+            params=params,
+            headers=HH_HEADERS,
+            timeout=15
+        )
         r.raise_for_status()
         data = r.json()
         log.info(f"HH.ru: найдено {data.get('found','?')}, загружено {len(data.get('items',[]))}")
@@ -127,12 +133,11 @@ r = requests.get("https://api.hh.ru/vacancies", params=params,
 
 def get_vacancy_details(vacancy_id: str) -> dict:
     try:
-r = requests.get(f"https://api.hh.ru/vacancies/{vacancy_id}",
-                         headers={
-                             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                             "Accept": "application/json",
-                             "Accept-Language": "ru-RU,ru;q=0.9",
-                         },
+        r = requests.get(
+            f"https://api.hh.ru/vacancies/{vacancy_id}",
+            headers=HH_HEADERS,
+            timeout=10
+        )
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -172,7 +177,7 @@ def score_vacancy_with_claude(vacancy: dict) -> dict:
             model="claude-sonnet-4-20250514",
             max_tokens=400,
             system='Ты помощник по поиску работы. Оцени вакансию. Отвечай СТРОГО JSON без markdown:\n{"score":<0-100>,"reason":"<1 предложение>","pros":["..."],"cons":["..."]}',
-            messages=[{"role":"user","content":f"Профиль:\n{MY_PROFILE}\n\nВакансия:\n{vacancy_text}\n\nОцени совпадение."}]
+            messages=[{"role": "user", "content": f"Профиль:\n{MY_PROFILE}\n\nВакансия:\n{vacancy_text}\n\nОцени совпадение."}]
         )
         text = re.sub(r"^```json\s*|```$", "", msg.content[0].text.strip(), flags=re.MULTILINE).strip()
         return json.loads(text)
@@ -189,9 +194,9 @@ def esc(t: str) -> str:
 
 
 def build_message(vacancy: dict, ai: dict) -> str:
-    score     = ai.get("score", 0)
-    emoji     = "🟢" if score >= 80 else "🟡" if score >= 65 else "🔴"
-    salary    = vacancy.get("salary")
+    score      = ai.get("score", 0)
+    emoji      = "🟢" if score >= 80 else "🟡" if score >= 65 else "🔴"
+    salary     = vacancy.get("salary")
     salary_str = "не указана"
     if salary:
         parts = []
