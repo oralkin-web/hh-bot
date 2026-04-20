@@ -110,12 +110,12 @@ def fetch_vacancies() -> list:
         "order_by": "publication_time",
     }
     try:
-        r = requests.get("https://api.hh.ru/vacancies", params=params,
+r = requests.get("https://api.hh.ru/vacancies", params=params,
                          headers={
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-    "Accept-Language": "ru-RU,ru;q=0.9",
-},
+                             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                             "Accept": "application/json",
+                             "Accept-Language": "ru-RU,ru;q=0.9",
+                         },
         r.raise_for_status()
         data = r.json()
         log.info(f"HH.ru: найдено {data.get('found','?')}, загружено {len(data.get('items',[]))}")
@@ -127,12 +127,12 @@ def fetch_vacancies() -> list:
 
 def get_vacancy_details(vacancy_id: str) -> dict:
     try:
-        r = requests.get(f"https://api.hh.ru/vacancies/{vacancy_id}",
+r = requests.get(f"https://api.hh.ru/vacancies/{vacancy_id}",
                          headers={
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-    "Accept-Language": "ru-RU,ru;q=0.9",
-},
+                             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                             "Accept": "application/json",
+                             "Accept-Language": "ru-RU,ru;q=0.9",
+                         },
         r.raise_for_status()
         return r.json()
     except Exception:
