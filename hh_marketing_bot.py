@@ -80,7 +80,7 @@ MY_PROFILE = """
 - Стартапы без бюджета и команды
 """
 
-MIN_SCORE = 65
+MIN_SCORE = 55
 
 SEEN_FILE   = Path("seen_vacancies.json")
 PAUSED_FILE = Path("paused.flag")
