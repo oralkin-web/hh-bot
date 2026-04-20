@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 HH.ru Design Director Job Bot with Claude AI
+Использует RSS-ленту hh.ru вместо заблокированного API
 """
 
 import os
@@ -11,7 +12,9 @@ import asyncio
 import re
 import schedule
 import threading
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 import anthropic
@@ -23,12 +26,20 @@ TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-SEARCH_CONFIG = {
-    "query": "руководитель департамента дизайна OR руководитель отдела дизайна OR руководитель дизайн студии OR руководитель дизайн группы OR дизайн директор OR дизайн-директор OR Design Director OR head of design OR директор по дизайну",
-    "area": 1,
-    "per_page": 100,
-    "check_interval_minutes": 60,
-}
+# RSS-ленты hh.ru — одна на каждый поисковый запрос
+RSS_QUERIES = [
+    "дизайн директор",
+    "Design Director",
+    "head of design",
+    "руководитель дизайн студии",
+    "руководитель дизайн группы",
+    "руководитель отдела дизайна",
+    "руководитель департамента дизайна",
+    "директор по дизайну",
+]
+
+AREA = "1"  # 1 = Москва
+CHECK_INTERVAL_MINUTES = 60
 
 MY_PROFILE = """
 Константин, 43 года, Москва. Опыт 24+ года в дизайне и креативном управлении.
@@ -77,10 +88,10 @@ PAUSED_FILE = Path("paused.flag")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
-HH_HEADERS = {
-    "User-Agent": "HH-User-Agent/1.0 (oralkin@gmail.com)",
-    "Accept": "application/json",
-    "HH-User-Agent": "HH-User-Agent/1.0 (oralkin@gmail.com)",
+RSS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/rss+xml, application/xml, text/xml",
+    "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
 
@@ -108,67 +119,75 @@ def save_seen(seen: set):
     SEEN_FILE.write_text(json.dumps(list(seen)))
 
 
-def fetch_vacancies() -> list:
-    params = {
-        "text": SEARCH_CONFIG["query"],
-        "area": SEARCH_CONFIG["area"],
-        "per_page": SEARCH_CONFIG["per_page"],
-        "order_by": "publication_time",
-    }
+def build_rss_url(query: str) -> str:
+    encoded = quote(query)
+    return f"https://hh.ru/search/vacancy/rss?text={encoded}&area={AREA}&order_by=publication_time"
+
+
+def fetch_rss(url: str) -> list:
+    """Получаем вакансии из одной RSS-ленты."""
     try:
-        r = requests.get(
-            "https://api.hh.ru/vacancies",
-            params=params,
-            headers=HH_HEADERS,
-            timeout=15
-        )
+        r = requests.get(url, headers=RSS_HEADERS, timeout=15)
         r.raise_for_status()
-        data = r.json()
-        log.info(f"HH.ru: найдено {data.get('found','?')}, загружено {len(data.get('items',[]))}")
-        return data.get("items", [])
+        root = ET.fromstring(r.content)
+        items = []
+        for item in root.findall(".//item"):
+            title = item.findtext("title", "").strip()
+            link  = item.findtext("link", "").strip()
+            desc  = item.findtext("description", "").strip()
+            pub   = item.findtext("pubDate", "").strip()
+
+            # Извлекаем ID вакансии из URL
+            match = re.search(r"/vacancy/(\d+)", link)
+            if not match:
+                continue
+            vacancy_id = match.group(1)
+
+            # Парсим название и компанию из title (формат: "Должность, Компания")
+            parts = title.split(", ", 1)
+            name    = parts[0].strip() if parts else title
+            company = parts[1].strip() if len(parts) > 1 else "—"
+
+            # Убираем HTML из описания
+            desc_clean = re.sub(r"<[^>]+>", " ", desc).strip()
+
+            items.append({
+                "id":      vacancy_id,
+                "name":    name,
+                "company": company,
+                "url":     link,
+                "desc":    desc_clean[:1000],
+                "pub":     pub,
+            })
+        return items
     except Exception as e:
-        log.error(f"Ошибка HH API: {e}")
+        log.error(f"Ошибка RSS ({url[:60]}...): {e}")
         return []
 
 
-def get_vacancy_details(vacancy_id: str) -> dict:
-    try:
-        r = requests.get(
-            f"https://api.hh.ru/vacancies/{vacancy_id}",
-            headers=HH_HEADERS,
-            timeout=10
-        )
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return {}
-
-
-def strip_html(text: str) -> str:
-    return re.sub(r"<[^>]+>", " ", text or "").strip()[:1500]
+def fetch_all_vacancies() -> list:
+    """Собираем вакансии из всех RSS-лент, убираем дубли."""
+    seen_ids = set()
+    all_items = []
+    for query in RSS_QUERIES:
+        url   = build_rss_url(query)
+        items = fetch_rss(url)
+        for item in items:
+            if item["id"] not in seen_ids:
+                seen_ids.add(item["id"])
+                all_items.append(item)
+        log.info(f"RSS '{query}': {len(items)} вакансий")
+        time.sleep(2)  # пауза между запросами
+    log.info(f"Итого уникальных: {len(all_items)}")
+    return all_items
 
 
 def score_vacancy_with_claude(vacancy: dict) -> dict:
-    details     = get_vacancy_details(vacancy.get("id", ""))
-    description = strip_html(details.get("description", ""))
-    salary      = vacancy.get("salary")
-    salary_str  = "не указана"
-    if salary:
-        parts = []
-        if salary.get("from"): parts.append(f"от {salary['from']:,}")
-        if salary.get("to"):   parts.append(f"до {salary['to']:,}")
-        salary_str = " ".join(parts) + f" {salary.get('currency','RUB')}"
-
-    key_skills   = [s["name"] for s in details.get("key_skills", [])]
     vacancy_text = (
         f"Название: {vacancy.get('name','—')}\n"
-        f"Компания: {vacancy.get('employer',{}).get('name','—')}\n"
-        f"Зарплата: {salary_str}\n"
-        f"Город: {vacancy.get('area',{}).get('name','—')}\n"
-        f"Формат: {vacancy.get('schedule',{}).get('name','—')}\n"
-        f"Опыт: {vacancy.get('experience',{}).get('name','—')}\n"
-        f"Навыки: {', '.join(key_skills) if key_skills else '—'}\n"
-        f"Описание: {description}"
+        f"Компания: {vacancy.get('company','—')}\n"
+        f"Описание: {vacancy.get('desc','—')}\n"
+        f"Ссылка: {vacancy.get('url','')}"
     )
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -194,39 +213,29 @@ def esc(t: str) -> str:
 
 
 def build_message(vacancy: dict, ai: dict) -> str:
-    score      = ai.get("score", 0)
-    emoji      = "🟢" if score >= 80 else "🟡" if score >= 65 else "🔴"
-    salary     = vacancy.get("salary")
-    salary_str = "не указана"
-    if salary:
-        parts = []
-        if salary.get("from"): parts.append(f"от {salary['from']:,}")
-        if salary.get("to"):   parts.append(f"до {salary['to']:,}")
-        salary_str = " ".join(parts) + f" {salary.get('currency','RUB')}"
+    score = ai.get("score", 0)
+    emoji = "🟢" if score >= 80 else "🟡" if score >= 65 else "🔴"
 
     msg = (
         f"{emoji} *{esc(vacancy.get('name','—'))}*\n"
-        f"🏢 {esc(vacancy.get('employer',{}).get('name','—'))}\n"
-        f"💰 {esc(salary_str)}\n"
-        f"📍 {esc(vacancy.get('area',{}).get('name','—'))} · {esc(vacancy.get('schedule',{}).get('name','—'))}\n"
-        f"🎓 {esc(vacancy.get('experience',{}).get('name','—'))} · {esc(vacancy.get('published_at','')[:10])}\n\n"
+        f"🏢 {esc(vacancy.get('company','—'))}\n\n"
         f"🤖 *AI\\-оценка: {score}/100*\n"
         f"_{esc(ai.get('reason',''))}_\n"
     )
     for p in ai.get("pros", []): msg += f"\n  ✅ {esc(p)}"
     for c in ai.get("cons", []): msg += f"\n  ❌ {esc(c)}"
-    msg += f"\n\n🔗 [Открыть вакансию]({vacancy.get('alternate_url','')})"
+    msg += f"\n\n🔗 [Открыть вакансию]({vacancy.get('url','')})"
     return msg
 
 
 async def check_and_notify(bot: Bot):
     if is_paused():
-        log.info("⏸ Бот на паузе, пропускаю проверку")
+        log.info("⏸ Бот на паузе")
         return
 
-    log.info("🔍 Проверяю вакансии...")
+    log.info("🔍 Проверяю вакансии через RSS...")
     seen      = load_seen()
-    vacancies = fetch_vacancies()
+    vacancies = fetch_all_vacancies()
     new       = [v for v in vacancies if v["id"] not in seen]
     log.info(f"Новых: {len(new)}")
 
@@ -236,7 +245,7 @@ async def check_and_notify(bot: Bot):
     sent = 0
     for v in new:
         seen.add(v["id"])
-        log.info(f"  → {v.get('name')} / {v.get('employer',{}).get('name','?')}")
+        log.info(f"  → {v.get('name')} / {v.get('company','?')}")
         ai    = score_vacancy_with_claude(v)
         score = ai.get("score", 0)
         log.info(f"     {score}/100")
@@ -273,7 +282,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 Привет, Константин\\!\n\n"
         f"Статус: {status}\n\n"
-        f"Слежу за вакансиями Design Director / Head of Design на hh\\.ru\\.\n\n"
+        f"Слежу за вакансиями Design Director / Head of Design на hh\\.ru через RSS\\.\n\n"
         f"/check — проверить прямо сейчас\n"
         f"/pause — поставить на паузу\n"
         f"/resume — возобновить\n"
@@ -287,14 +296,14 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_paused():
         await update.message.reply_text("⏸ Бот на паузе\\. Напиши /resume чтобы возобновить\\.", parse_mode=ParseMode.MARKDOWN_V2)
         return
-    await update.message.reply_text("🔍 Запускаю проверку, подожди...")
+    await update.message.reply_text("🔍 Запускаю проверку, подожди пару минут...")
     await check_and_notify(context.bot)
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_paused(True)
     await update.message.reply_text(
-        "⏸ Бот поставлен на паузу\\. Автоматические проверки остановлены\\.\nНапиши /resume чтобы возобновить\\.",
+        "⏸ Бот поставлен на паузу\\.\nНапиши /resume чтобы возобновить\\.",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
@@ -314,7 +323,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚙️ *Настройки*\n\n"
         f"Статус: {status}\n"
         f"📍 Регион: Москва\n"
-        f"⏰ Проверка каждые: `{SEARCH_CONFIG['check_interval_minutes']} мин`\n"
+        f"⏰ Проверка каждые: `{CHECK_INTERVAL_MINUTES} мин`\n"
         f"🏆 Мин\\. балл AI: `{MIN_SCORE}/100`\n"
         f"👁 Просмотрено: `{len(seen)}` вакансий",
         parse_mode=ParseMode.MARKDOWN_V2
@@ -332,14 +341,14 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def run_scheduler(bot: Bot, loop):
     def job():
         asyncio.run_coroutine_threadsafe(check_and_notify(bot), loop)
-    schedule.every(SEARCH_CONFIG["check_interval_minutes"]).minutes.do(job)
+    schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(job)
     while True:
         schedule.run_pending()
         time.sleep(30)
 
 
 def main():
-    log.info("🚀 Запускаю HH Design Bot...")
+    log.info("🚀 Запускаю HH Design Bot (RSS режим)...")
     if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY]):
         print("⚠️  Задай переменные окружения: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY")
         return
