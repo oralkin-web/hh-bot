@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 HH.ru Design Director Job Bot with Claude AI
-Использует RSS-ленту hh.ru вместо заблокированного API
+Использует RSS + предфильтрацию для экономии API
 """
 
 import os
@@ -26,7 +26,6 @@ TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# RSS-ленты hh.ru — одна на каждый поисковый запрос
 RSS_QUERIES = [
     "дизайн директор",
     "Design Director",
@@ -38,8 +37,20 @@ RSS_QUERIES = [
     "директор по дизайну",
 ]
 
-AREA = "1"  # 1 = Москва
-CHECK_INTERVAL_MINUTES = 60
+AREA = "1"
+CHECK_INTERVAL_MINUTES = 120  # каждые 2 часа
+
+# Слова которые ДОЛЖНЫ быть в названии — иначе не отправляем в Claude
+TITLE_MUST_INCLUDE = [
+    "дизайн", "design", "креатив", "creative", "бренд", "brand", "визуал", "visual",
+]
+
+# Слова которые сразу отсеивают вакансию
+TITLE_EXCLUDE = [
+    "ресторан", "бухгалтер", "менеджер по продажам", "водитель", "повар",
+    "врач", "юрист", "строитель", "верстальщик", "программист", "разработчик",
+    "1с", "финансов", "архитектор интерьер", "менеджер проектов интерьер",
+]
 
 MY_PROFILE = """
 Константин, 43 года, Москва. Опыт 24+ года в дизайне и креативном управлении.
@@ -55,15 +66,13 @@ MY_PROFILE = """
 
 ОПЫТ:
 - Операционный директор дизайн-студии Азбуки Вкуса (март 2025–сейчас)
-  4 команды: дизайн коммуникаций, упаковка, фотостудия, копирайтеры
-- БКС Мир инвестиций (3.5 года): создал департамент дизайна с нуля,
-  ребрендинг, дизайн-система, федеральные РК
+- БКС Мир инвестиций (3.5 года): создал департамент дизайна с нуля
 - Лаборатория Касперского: Senior Designer / PM, глобальный ребрендинг
 - BBDO, Publicis: арт-директор, международные бренды
 - 13 лет Крик Дизайн: Креативный директор, IKEA, VISA, VW, AWWWARDS
 
 КОМПЕТЕНЦИИ:
-- Управление командами до 20+ человек (дизайнеры, копирайтеры, фотографы)
+- Управление командами до 20+ человек
 - Найм, мотивация, развитие персонала
 - Внедрение AI-инструментов в дизайн-процессы
 - Бюджетирование, тендеры, подрядчики
@@ -74,9 +83,8 @@ MY_PROFILE = """
 - Арт-директор или креативный директор без управленческой функции
 - Рядовой дизайнер без управления командой
 - Чисто IT без креатива
-- Аутсорс-агентства низкого уровня (агентства уровня ONY, Superheroes, Plenum — подходят)
-- Типографии
-- Вакансии вне Москвы или полностью удалённые
+- Аутсорс-агентства низкого уровня (ONY, Superheroes, Plenum — подходят)
+- Типографии, вакансии вне Москвы, полностью удалённые
 - Стартапы без бюджета и команды
 """
 
@@ -95,18 +103,18 @@ RSS_HEADERS = {
 }
 
 
-def is_paused() -> bool:
+def is_paused():
     return PAUSED_FILE.exists()
 
 
-def set_paused(state: bool):
+def set_paused(state):
     if state:
         PAUSED_FILE.touch()
     else:
         PAUSED_FILE.unlink(missing_ok=True)
 
 
-def load_seen() -> set:
+def load_seen():
     if SEEN_FILE.exists():
         try:
             return set(json.loads(SEEN_FILE.read_text()))
@@ -115,17 +123,26 @@ def load_seen() -> set:
     return set()
 
 
-def save_seen(seen: set):
+def save_seen(seen):
     SEEN_FILE.write_text(json.dumps(list(seen)))
 
 
-def build_rss_url(query: str) -> str:
-    encoded = quote(query)
-    return f"https://hh.ru/search/vacancy/rss?text={encoded}&area={AREA}&order_by=publication_time"
+def prefilter(title):
+    title_lower = title.lower()
+    for word in TITLE_EXCLUDE:
+        if word in title_lower:
+            return False
+    for word in TITLE_MUST_INCLUDE:
+        if word in title_lower:
+            return True
+    return False
 
 
-def fetch_rss(url: str) -> list:
-    """Получаем вакансии из одной RSS-ленты."""
+def build_rss_url(query):
+    return f"https://hh.ru/search/vacancy/rss?text={quote(query)}&area={AREA}&order_by=publication_time"
+
+
+def fetch_rss(url):
     try:
         r = requests.get(url, headers=RSS_HEADERS, timeout=15)
         r.raise_for_status()
@@ -135,61 +152,42 @@ def fetch_rss(url: str) -> list:
             title = item.findtext("title", "").strip()
             link  = item.findtext("link", "").strip()
             desc  = item.findtext("description", "").strip()
-            pub   = item.findtext("pubDate", "").strip()
-
-            # Извлекаем ID вакансии из URL
             match = re.search(r"/vacancy/(\d+)", link)
             if not match:
                 continue
             vacancy_id = match.group(1)
-
-            # Парсим название и компанию из title (формат: "Должность, Компания")
-            parts = title.split(", ", 1)
+            parts   = title.split(", ", 1)
             name    = parts[0].strip() if parts else title
             company = parts[1].strip() if len(parts) > 1 else "—"
-
-            # Убираем HTML из описания
-            desc_clean = re.sub(r"<[^>]+>", " ", desc).strip()
-
-            items.append({
-                "id":      vacancy_id,
-                "name":    name,
-                "company": company,
-                "url":     link,
-                "desc":    desc_clean[:1000],
-                "pub":     pub,
-            })
+            desc_clean = re.sub(r"<[^>]+>", " ", desc).strip()[:1000]
+            items.append({"id": vacancy_id, "name": name, "company": company, "url": link, "desc": desc_clean})
         return items
     except Exception as e:
-        log.error(f"Ошибка RSS ({url[:60]}...): {e}")
+        log.error(f"Ошибка RSS: {e}")
         return []
 
 
-def fetch_all_vacancies() -> list:
-    """Собираем вакансии из всех RSS-лент, убираем дубли."""
-    seen_ids = set()
+def fetch_all_vacancies():
+    seen_ids  = set()
     all_items = []
     for query in RSS_QUERIES:
-        url   = build_rss_url(query)
-        items = fetch_rss(url)
+        items = fetch_rss(build_rss_url(query))
         for item in items:
             if item["id"] not in seen_ids:
                 seen_ids.add(item["id"])
                 all_items.append(item)
-        log.info(f"RSS '{query}': {len(items)} вакансий")
-        time.sleep(2)  # пауза между запросами
-    log.info(f"Итого уникальных: {len(all_items)}")
+        time.sleep(2)
+    log.info(f"RSS: получено {len(all_items)} уникальных вакансий")
     return all_items
 
 
-def score_vacancy_with_claude(vacancy: dict) -> dict:
+def score_vacancy_with_claude(vacancy):
     vacancy_text = (
         f"Название: {vacancy.get('name','—')}\n"
         f"Компания: {vacancy.get('company','—')}\n"
         f"Описание: {vacancy.get('desc','—')}\n"
         f"Ссылка: {vacancy.get('url','')}"
     )
-
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     try:
         msg = client.messages.create(
@@ -207,15 +205,14 @@ def score_vacancy_with_claude(vacancy: dict) -> dict:
         return {"score": 0, "reason": f"Ошибка AI: {e}", "pros": [], "cons": []}
 
 
-def esc(t: str) -> str:
+def esc(t):
     chars = r"\_*[]()~`>#+-=|{}.!"
     return "".join(f"\\{c}" if c in chars else c for c in str(t))
 
 
-def build_message(vacancy: dict, ai: dict) -> str:
+def build_message(vacancy, ai):
     score = ai.get("score", 0)
     emoji = "🟢" if score >= 80 else "🟡" if score >= 65 else "🔴"
-
     msg = (
         f"{emoji} *{esc(vacancy.get('name','—'))}*\n"
         f"🏢 {esc(vacancy.get('company','—'))}\n\n"
@@ -228,28 +225,34 @@ def build_message(vacancy: dict, ai: dict) -> str:
     return msg
 
 
-async def check_and_notify(bot: Bot):
+async def check_and_notify(bot):
     if is_paused():
         log.info("⏸ Бот на паузе")
         return
 
-    log.info("🔍 Проверяю вакансии через RSS...")
+    log.info("🔍 Проверяю вакансии...")
     seen      = load_seen()
     vacancies = fetch_all_vacancies()
     new       = [v for v in vacancies if v["id"] not in seen]
     log.info(f"Новых: {len(new)}")
 
-    if not new:
+    filtered = [v for v in new if prefilter(v["name"])]
+    skipped  = len(new) - len(filtered)
+    log.info(f"После предфильтрации: {len(filtered)} (отсеяно {skipped} бесплатно)")
+
+    for v in new:
+        seen.add(v["id"])
+    save_seen(seen)
+
+    if not filtered:
         return
 
     sent = 0
-    for v in new:
-        seen.add(v["id"])
-        log.info(f"  → {v.get('name')} / {v.get('company','?')}")
+    for v in filtered:
+        log.info(f"  → Claude: {v.get('name')} / {v.get('company','?')}")
         ai    = score_vacancy_with_claude(v)
         score = ai.get("score", 0)
         log.info(f"     {score}/100")
-
         if score >= MIN_SCORE:
             try:
                 await bot.send_message(
@@ -263,14 +266,12 @@ async def check_and_notify(bot: Bot):
                 log.error(f"Telegram ошибка: {e}")
         time.sleep(1.5)
 
-    save_seen(seen)
     log.info(f"Отправлено: {sent}")
-
     if sent == 0:
         try:
             await bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
-                text=f"🔍 Проверено {len(new)} вакансий — подходящих нет\\. Слежу дальше\\.",
+                text=f"🔍 Из {len(new)} вакансий {len(filtered)} прошли фильтр — подходящих нет\\. Слежу дальше\\.",
                 parse_mode=ParseMode.MARKDOWN_V2
             )
         except Exception:
@@ -280,9 +281,8 @@ async def check_and_notify(bot: Bot):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "⏸ на паузе" if is_paused() else "✅ активен"
     await update.message.reply_text(
-        f"👋 Привет, Константин\\!\n\n"
-        f"Статус: {status}\n\n"
-        f"Слежу за вакансиями Design Director / Head of Design на hh\\.ru через RSS\\.\n\n"
+        f"👋 Привет, Константин\\!\n\nСтатус: {status}\n\n"
+        f"Проверка каждые 2 часа\\.\n\n"
         f"/check — проверить прямо сейчас\n"
         f"/pause — поставить на паузу\n"
         f"/resume — возобновить\n"
@@ -294,7 +294,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_paused():
-        await update.message.reply_text("⏸ Бот на паузе\\. Напиши /resume чтобы возобновить\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("⏸ Бот на паузе\\. Напиши /resume\\.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     await update.message.reply_text("🔍 Запускаю проверку, подожди пару минут...")
     await check_and_notify(context.bot)
@@ -302,26 +302,19 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_paused(True)
-    await update.message.reply_text(
-        "⏸ Бот поставлен на паузу\\.\nНапиши /resume чтобы возобновить\\.",
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
+    await update.message.reply_text("⏸ Бот на паузе\\.\nНапиши /resume чтобы возобновить\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_paused(False)
-    await update.message.reply_text(
-        "▶️ Бот возобновлён\\! Буду проверять вакансии каждый час\\.",
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
+    await update.message.reply_text("▶️ Бот возобновлён\\! Проверка каждые 2 часа\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     seen   = load_seen()
     status = "⏸ на паузе" if is_paused() else "✅ активен"
     await update.message.reply_text(
-        f"⚙️ *Настройки*\n\n"
-        f"Статус: {status}\n"
+        f"⚙️ *Настройки*\n\nСтатус: {status}\n"
         f"📍 Регион: Москва\n"
         f"⏰ Проверка каждые: `{CHECK_INTERVAL_MINUTES} мин`\n"
         f"🏆 Мин\\. балл AI: `{MIN_SCORE}/100`\n"
@@ -332,13 +325,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SEEN_FILE.unlink(missing_ok=True)
-    await update.message.reply_text(
-        "🗑 История сброшена\\. При следующей проверке все вакансии будут новыми\\.",
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
+    await update.message.reply_text("🗑 История сброшена\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 
-def run_scheduler(bot: Bot, loop):
+def run_scheduler(bot, loop):
     def job():
         asyncio.run_coroutine_threadsafe(check_and_notify(bot), loop)
     schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(job)
@@ -348,9 +338,9 @@ def run_scheduler(bot: Bot, loop):
 
 
 def main():
-    log.info("🚀 Запускаю HH Design Bot (RSS режим)...")
+    log.info("🚀 Запускаю HH Design Bot...")
     if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY]):
-        print("⚠️  Задай переменные окружения: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY")
+        print("⚠️  Задай переменные: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY")
         return
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
